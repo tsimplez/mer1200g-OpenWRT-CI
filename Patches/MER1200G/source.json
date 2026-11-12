@@ -1,0 +1,41 @@
+{
+  "source_repository": "https://github.com/VIKINGYFY/immortalwrt.git",
+  "source_base_commit": "2bb59802ceeb8bcba408a7b6694f0c4669e24eab",
+  "kernel_series": "6.18",
+  "device_patch": "0001-native-support.patch",
+  "device_patch_sha256": "f02ef3402ad7b608c8d9bc83c29225627c0ba89b462abcb31666c4114d157dff",
+  "files": [
+    {
+      "path": "scripts/mer1200g-image.py",
+      "sha256": "173ce895b2dc4b266829c496027194cca59002ac81e6103202684fd6cb7ef8cb"
+    },
+    {
+      "path": "target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1.dts",
+      "sha256": "73f1365f5dd7e684f89c15acc76336def29c1f0783df16485f506f90b6acf2ba"
+    },
+    {
+      "path": "target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1-initramfs.dts",
+      "sha256": "d604f33252664c01be4c87249f740c4dd404701b0363ccc7fe976a546cf436f2"
+    },
+    {
+      "path": "target/linux/ramips/image/mt7620.mk",
+      "sha256": "b815d6352c26655c52e850adcccc5db3ad2589b5fbfbc7a0f46344de0a27bb17"
+    },
+    {
+      "path": "target/linux/ramips/mt7620/base-files/etc/board.d/02_network",
+      "sha256": "92c35f1e9379f95b0e83294e3530e9d43abeb74ecd83207bf0c3a4fd93979e10"
+    },
+    {
+      "path": "target/linux/ramips/patches-6.18/333-MIPS-ralink-use-appended-DT-for-MER1200G.patch",
+      "sha256": "667b80c2d2765f2dc97d906ad515ca868848b0fc3ecae37eac8dbb706f2b1f25"
+    },
+    {
+      "path": "target/linux/ramips/patches-6.18/334-mt7620-avoid-direct-jal-in-timing-entropy.patch",
+      "sha256": "d22414f91063267fedcc5b816c561874a2231c88a46751d63857c84d603f6822"
+    },
+    {
+      "path": "target/linux/ramips/patches-6.18/761-net-dsa-add-ralink-metadata-tagger.patch",
+      "sha256": "6a6e95caef92eb3601b2cd204fdb49689d1545b2e5ff370e33bd719cba70fd70"
+    }
+  ]
+}

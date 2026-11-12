@@ -143,6 +143,12 @@ jobs:
         run: |
           find ./ -maxdepth 3 -type f -iregex ".*\(txt\|sh\)$" -exec dos2unix {} \; -exec chmod +x {} \;
 
+      - name: Prepare MER1200G Source
+        if: ${{ inputs.WRT_CONFIG == 'MER1200G' }}
+        run: |
+          cd ./wrt/
+          bash "$GITHUB_WORKSPACE/.github/scripts/prepare-mer1200g.sh" source
+
       - name: Restore Build Cache
         id: cache-restore
         if: ${{ !inputs.WRT_TEST }}
@@ -176,27 +182,38 @@ jobs:
         run: |
           cd ./wrt/
 
-          $GITHUB_WORKSPACE/Scripts/Packages.sh
-          $GITHUB_WORKSPACE/Scripts/Handles.sh
-          $GITHUB_WORKSPACE/.github/scripts/prepare-i2c-tools.sh
+          if [[ "$WRT_CONFIG" == MER1200G ]]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/prepare-mer1200g.sh" theme
+          else
+            $GITHUB_WORKSPACE/Scripts/Packages.sh
+            $GITHUB_WORKSPACE/Scripts/Handles.sh
+            $GITHUB_WORKSPACE/.github/scripts/prepare-i2c-tools.sh
+          fi
 
       - name: Custom Settings
         run: |
           cd ./wrt/
 
-          if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
+          if [[ "$WRT_CONFIG" == MER1200G ]]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/prepare-mer1200g.sh" settings
           else
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL.txt >> .config
+            if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
+              cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
+            else
+              cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL.txt >> .config
+            fi
+            $GITHUB_WORKSPACE/Scripts/Settings.sh
+            $GITHUB_WORKSPACE/.github/scripts/prepare-build-host.sh
           fi
 
-          $GITHUB_WORKSPACE/Scripts/Settings.sh
-          $GITHUB_WORKSPACE/.github/scripts/prepare-build-host.sh
-
-          make defconfig -j$(nproc) && make clean -j$(nproc)
+          make defconfig -j$(nproc)
+          if [[ "$WRT_CONFIG" == MER1200G ]]; then
+            bash "$GITHUB_WORKSPACE/.github/scripts/prepare-mer1200g.sh" verify-config
+          fi
+          make clean -j$(nproc)
 
       - name: Prepare Rust Toolchain
-        if: ${{ !inputs.WRT_TEST }}
+        if: ${{ !inputs.WRT_TEST && inputs.WRT_CONFIG != 'MER1200G' }}
         run: |
           cd ./wrt/
 
@@ -257,7 +274,14 @@ jobs:
           du -h --max-depth=1
           echo "======================="
 
+      - name: Package MER1200G Firmware
+        if: ${{ inputs.WRT_CONFIG == 'MER1200G' }}
+        run: |
+          cd ./wrt/
+          bash "$GITHUB_WORKSPACE/.github/scripts/package-mer1200g.sh"
+
       - name: Package Firmware
+        if: ${{ inputs.WRT_CONFIG != 'MER1200G' }}
         run: |
           cd ./wrt/ && mkdir ./upload/
 
@@ -281,7 +305,16 @@ jobs:
             make clean -j$(nproc)
           fi
 
+      - name: Release MER1200G Firmware
+        if: ${{ inputs.WRT_CONFIG == 'MER1200G' }}
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
+          files: ./wrt/upload/*
+          body_path: ./build-reports/mer1200g-release.md
+
       - name: Release Firmware
+        if: ${{ inputs.WRT_CONFIG != 'MER1200G' }}
         uses: softprops/action-gh-release@master
         with:
           tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}

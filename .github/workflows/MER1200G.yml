@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: MIT
+name: MER1200G
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE:
+        description: '源码仓库，默认应用本仓库保存的 MER1200G 支持补丁。'
+        default: VIKINGYFY/immortalwrt
+        required: true
+        type: string
+      BRANCH:
+        description: '源码分支。升级上游后补丁不兼容时停止，不能忽略错误。'
+        default: owrt
+        required: true
+        type: string
+      PACKAGE:
+        description: '可选附加配置，多行用 \n 分隔；超出闪存容量会停止。'
+        required: false
+        type: string
+      TEST:
+        description: '仅展开并验证配置，不编译固件。'
+        default: false
+        required: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  config:
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_CONFIG: MER1200G
+      WRT_THEME: vantage
+      WRT_NAME: MER1200G
+      WRT_SSID: 使用源码默认值
+      WRT_WORD: 使用源码默认值
+      WRT_IP: 192.168.1.1
+      WRT_PW: 首次安装后设置；保留配置升级沿用原密码
+      WRT_REPO: https://github.com/${{inputs.SOURCE}}.git
+      WRT_BRANCH: ${{inputs.BRANCH}}
+      WRT_SOURCE: ${{inputs.SOURCE}}
+      WRT_PACKAGE: ${{inputs.PACKAGE}}
+      WRT_TEST: ${{inputs.TEST}}

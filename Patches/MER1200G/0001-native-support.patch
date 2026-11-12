@@ -1,0 +1,710 @@
+diff --git a/scripts/mer1200g-image.py b/scripts/mer1200g-image.py
+new file mode 100644
+index 0000000000..0064a5d27f
+--- /dev/null
++++ b/scripts/mer1200g-image.py
+@@ -0,0 +1,198 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-or-later
++"""Build the single-component multi-uImage required by MER1200G's U-Boot.
++
++This only packages local build outputs. Passing these checks does not establish
++that a new kernel boots, or make this image suitable for the stock web updater.
++"""
++
++import argparse
++import lzma
++import struct
++import subprocess
++from pathlib import Path
++import zlib
++
++
++LOAD = 0x80000000
++ENTRY = 0x80000400
++STAGING = 0x82000000
++FLASH_SIZE = 0x1000000
++FIRMWARE_START = 0x40000
++FIRMWARE_SIZE = 0xCF0000
++LZMA_PROPERTIES = bytes.fromhex("6d00008000")
++
++
++def require(condition, message):
++    if not condition:
++        raise ValueError(message)
++
++
++def dtb_nodes(data):
++    """Read the properties needed for the board/layout checks without libfdt."""
++    require(len(data) >= 40, "truncated DTB")
++    magic, size, off_struct, off_strings, _, version, last, _, strings_size, struct_size = \
++        struct.unpack_from(">10I", data)
++    require(magic == 0xD00DFEED and size == len(data), "invalid DTB size or magic")
++    require(version >= 17 and last <= 17, "unsupported DTB version")
++    require(off_struct + struct_size <= size and off_strings + strings_size <= size,
++            "DTB block outside the image")
++    strings = data[off_strings:off_strings + strings_size]
++    end = off_struct + struct_size
++    cursor = off_struct
++    stack = []
++    nodes = {}
++    while cursor + 4 <= end:
++        token, = struct.unpack_from(">I", data, cursor)
++        cursor += 4
++        if token == 1:  # FDT_BEGIN_NODE
++            stop = data.find(b"\0", cursor, end)
++            require(stop >= cursor, "unterminated DTB node name")
++            stack.append(data[cursor:stop].decode("ascii"))
++            path = "/" + "/".join(stack[1:])
++            require(path not in nodes, "duplicate DTB node")
++            nodes[path] = {}
++            cursor = (stop + 4) & ~3
++        elif token == 2:  # FDT_END_NODE
++            require(stack, "unbalanced DTB node")
++            stack.pop()
++        elif token == 3:  # FDT_PROP
++            require(stack and cursor + 8 <= end, "invalid DTB property")
++            length, nameoff = struct.unpack_from(">II", data, cursor)
++            cursor += 8
++            stop = strings.find(b"\0", nameoff)
++            require(0 <= nameoff < len(strings) and stop >= nameoff and
++                    cursor + length <= end, "DTB property outside its block")
++            name = strings[nameoff:stop].decode("ascii")
++            props = nodes["/" + "/".join(stack[1:])]
++            require(name not in props, "duplicate DTB property")
++            props[name] = data[cursor:cursor + length]
++            cursor = (cursor + length + 3) & ~3
++        elif token == 4:  # FDT_NOP
++            continue
++        elif token == 9:  # FDT_END
++            require(not stack and "/" in nodes, "incomplete DTB")
++            return nodes
++        else:
++            raise ValueError("invalid DTB token")
++    raise ValueError("missing DTB end token")
++
++
++def check_dtb(data, initramfs):
++    nodes = dtb_nodes(data)
++    require(b"mercury,mer1200g-v1" in nodes["/"].get("compatible", b"").split(b"\0"),
++            "DTB is not for MER1200G v1")
++    parts = []
++    for path, props in nodes.items():
++        require("linux,rootfs" not in props, "DTB must not force a flash rootfs")
++        require(props.get("label") not in (b"kernel\0", b"rootfs\0", b"rootfs_data\0"),
++                "use a dynamic firmware partition, not fixed kernel/rootfs partitions")
++        if path.rsplit("/", 1)[0].rsplit("/", 1)[-1] != "partitions":
++            continue
++        require(len(props.get("reg", b"")) == 8, "invalid flash partition range")
++        offset, size = struct.unpack(">II", props["reg"])
++        require(size > 0, "empty flash partition")
++        parts.append((offset, size, props))
++
++    cursor = 0
++    firmware = None
++    for offset, size, props in sorted(parts, key=lambda part: part[0]):
++        require(offset == cursor, "flash partitions overlap or leave a gap")
++        cursor += size
++        if offset == FIRMWARE_START and size == FIRMWARE_SIZE:
++            firmware = props
++        else:
++            require("read-only" in props, "a protected flash partition is writable")
++        if initramfs:
++            require("read-only" in props, "initramfs exposes a writable flash partition")
++    require(cursor == FLASH_SIZE and firmware is not None, "unexpected 16 MiB flash layout")
++
++    if initramfs:
++        require(firmware.get("label") == b"firmware-readonly\0" and
++                "compatible" not in firmware and "openwrt,ih-type" not in firmware,
++                "initramfs must disable automatic firmware splitting")
++        chosen = nodes.get("/chosen", {})
++        for prop in ("bootargs", "bootargs-override"):
++            require(chosen.get(prop) == b"console=ttyS0,115200\0",
++                    "initramfs boot arguments must not select flash storage")
++    else:
++        require(firmware.get("label") == b"firmware\0" and "read-only" not in firmware,
++                "persistent firmware partition is missing or read-only")
++        require(b"openwrt,uimage" in firmware.get("compatible", b"").split(b"\0") and
++                firmware.get("openwrt,ih-type") == struct.pack(">I", 4),
++                "firmware parser must accept IH_TYPE_MULTI")
++
++
++def check_kernel(raw, elf_path, nm, dtb_size):
++    with elf_path.open("rb") as elf:
++        header = elf.read(52)
++    require(len(header) == 52 and header[:7] == b"\x7fELF\x01\x01\x01" and
++            struct.unpack_from("<H", header, 18)[0] == 8,
++            "kernel ELF must be 32-bit little-endian MIPS")
++    elf_entry, = struct.unpack_from("<I", header, 24)
++    names = {"__kernel_entry", "kernel_entry", "__appended_dtb", "_end"}
++    symbols = {}
++    listing = subprocess.check_output([nm, "-P", "--defined-only", str(elf_path)], text=True)
++    for line in listing.splitlines():
++        fields = line.split()
++        if fields and fields[0] in names:
++            require(len(fields) >= 3 and fields[0] not in symbols, "ambiguous kernel symbol")
++            symbols[fields[0]] = int(fields[2], 16)
++    require(symbols.keys() == names, "kernel ELF is missing required entry/DTB symbols")
++    require(symbols["__kernel_entry"] == ENTRY and symbols["kernel_entry"] == elf_entry,
++            "kernel entry does not match the vendor boot address")
++    require(len(raw) == symbols["__appended_dtb"] - LOAD and len(raw) > ENTRY - LOAD + 4,
++            "raw kernel does not end at __appended_dtb")
++    jump, = struct.unpack_from("<I", raw, ENTRY - LOAD)
++    target = ((ENTRY + 4) & 0xF0000000) | ((jump & 0x03FFFFFF) << 2)
++    require(jump >> 26 == 2 and target == elf_entry, "missing MIPS entry jump at 0x80000400")
++    require(LOAD < symbols["_end"] < STAGING and LOAD + len(raw) + dtb_size < STAGING,
++            "expanded kernel/DTB overlaps the required 0x82000000 staging address")
++
++
++def multi_image(expanded, timestamp, name):
++    require(0 < len(expanded) < STAGING - LOAD, "expanded image exceeds the boot window")
++    require(0 <= timestamp <= 0xFFFFFFFF, "uImage timestamp is outside uint32")
++    compressed = lzma.compress(expanded, format=lzma.FORMAT_ALONE, filters=[{
++        "id": lzma.FILTER_LZMA1, "dict_size": 8 * 1024 * 1024,
++        "lc": 1, "lp": 2, "pb": 2,
++    }])
++    require(compressed[:5] == LZMA_PROPERTIES, "unexpected vendor LZMA properties")
++    # U-Boot's decoder rejects the unknown-length marker used by liblzma.
++    compressed = compressed[:5] + struct.pack("<Q", len(expanded)) + compressed[13:]
++    require(lzma.decompress(compressed, format=lzma.FORMAT_ALONE) == expanded,
++            "LZMA round-trip check failed")
++    # One component, then the terminating zero; the final component is unpadded.
++    payload = struct.pack(">II", len(compressed), 0) + compressed
++    header = struct.pack(">7I4B32s", 0x27051956, 0, timestamp, len(payload), LOAD, ENTRY,
++                         zlib.crc32(payload), 5, 5, 4, 3, name.encode("ascii")[:32])
++    header = header[:4] + struct.pack(">I", zlib.crc32(header)) + header[8:]
++    return header + payload
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--kernel", type=Path, required=True)
++    parser.add_argument("--elf", type=Path, required=True)
++    parser.add_argument("--dtb", type=Path, required=True)
++    parser.add_argument("--nm", required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--timestamp", type=int, default=0)
++    parser.add_argument("--name", default="MER1200G ImmortalWrt")
++    parser.add_argument("--initramfs", action="store_true")
++    args = parser.parse_args()
++    try:
++        raw = args.kernel.read_bytes()
++        dtb = args.dtb.read_bytes()
++        check_dtb(dtb, args.initramfs)
++        check_kernel(raw, args.elf, args.nm, len(dtb))
++        image = multi_image(raw + dtb, args.timestamp, args.name)
++        if not args.initramfs:
++            require(len(image) < FIRMWARE_SIZE, "kernel alone fills the firmware partition")
++        args.output.write_bytes(image)
++    except (OSError, ValueError, lzma.LZMAError, subprocess.CalledProcessError) as error:
++        parser.exit(1, "MER1200G image: {}\n".format(error))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1-initramfs.dts b/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1-initramfs.dts
+new file mode 100644
+index 0000000000..1669366a15
+--- /dev/null
++++ b/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1-initramfs.dts
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++#include "mt7620a_mercury_mer1200g-v1.dts"
++
++/ {
++	chosen {
++		bootargs = "console=ttyS0,115200";
++		bootargs-override = "console=ttyS0,115200";
++	};
++};
++
++/* Keep existing flash contents out of the firmware/rootfs split parsers. */
++&firmware {
++	/delete-property/ compatible;
++	/delete-property/ openwrt,ih-type;
++	label = "firmware-readonly";
++	read-only;
++};
+diff --git a/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1.dts b/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1.dts
+new file mode 100644
+index 0000000000..7784333f61
+--- /dev/null
++++ b/target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1.dts
+@@ -0,0 +1,190 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++#include "mt7620a.dtsi"
++
++#include <dt-bindings/mtd/partitions/uimage.h>
++
++/ {
++	compatible = "mercury,mer1200g-v1", "ralink,mt7620a-soc";
++	model = "Mercury MER1200G v1";
++
++	aliases {
++		label-mac-device = &ethernet;
++	};
++
++	memory@0 {
++		device_type = "memory";
++		reg = <0x0 0x08000000>;
++	};
++
++	chosen {
++		bootargs = "console=ttyS0,115200 rootfstype=squashfs";
++		bootargs-override = "console=ttyS0,115200 rootfstype=squashfs";
++	};
++
++	rtl8367s {
++		compatible = "realtek,rtl8367b";
++		realtek,extif = <7 1 4 1 1 1 1 1 1 2>;
++		mii-bus = <&mdio0>;
++		phy-id = <29>;
++	};
++};
++
++&gpio1 {
++	status = "okay";
++};
++
++&gpio2 {
++	status = "okay";
++};
++
++&gpio3 {
++	status = "okay";
++};
++
++&state_default {
++	gpio {
++		groups = "i2c", "uartf", "ephy", "rgmii2";
++		function = "gpio";
++	};
++};
++
++&spi0 {
++	status = "okay";
++
++	flash@0 {
++		compatible = "jedec,spi-nor";
++		reg = <0>;
++		spi-max-frequency = <30000000>;
++
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			partition@0 {
++				label = "bootloader";
++				reg = <0x000000 0x040000>;
++				read-only;
++			};
++
++			firmware: partition@40000 {
++				compatible = "openwrt,uimage", "denx,uimage";
++				openwrt,ih-type = <IH_TYPE_MULTI>;
++				label = "firmware";
++				reg = <0x040000 0xcf0000>;
++			};
++
++			partition@d30000 {
++				label = "device-info";
++				reg = <0xd30000 0x010000>;
++				read-only;
++			};
++
++			partition@d40000 {
++				label = "firmware-info";
++				reg = <0xd40000 0x010000>;
++				read-only;
++			};
++
++			partition@d50000 {
++				label = "tddp";
++				reg = <0xd50000 0x010000>;
++				read-only;
++
++				nvmem-layout {
++					compatible = "fixed-layout";
++					#address-cells = <1>;
++					#size-cells = <1>;
++
++					macaddr_tddp_28: macaddr@28 {
++						compatible = "mac-base";
++						reg = <0x28 0xc>;
++						#nvmem-cell-cells = <1>;
++					};
++				};
++			};
++
++			partition@d60000 {
++				label = "log";
++				reg = <0xd60000 0x020000>;
++				read-only;
++			};
++
++			partition@d80000 {
++				label = "reserved";
++				reg = <0xd80000 0x070000>;
++				read-only;
++			};
++
++			partition@df0000 {
++				label = "rootfs-data-stock";
++				reg = <0xdf0000 0x200000>;
++				read-only;
++			};
++
++			partition@ff0000 {
++				label = "art";
++				reg = <0xff0000 0x010000>;
++				read-only;
++
++				nvmem-layout {
++					compatible = "fixed-layout";
++					#address-cells = <1>;
++					#size-cells = <1>;
++
++					eeprom_art_0: eeprom@0 {
++						reg = <0x0 0x200>;
++					};
++
++					eeprom_art_1000: eeprom@1000 {
++						reg = <0x1000 0x200>;
++					};
++				};
++			};
++		};
++	};
++};
++
++&ethernet {
++	pinctrl-names = "default";
++	pinctrl-0 = <&rgmii1_pins &mdio_pins>;
++
++	nvmem-cells = <&macaddr_tddp_28 0>;
++	nvmem-cell-names = "mac-address";
++
++	port@5 {
++		status = "okay";
++		mediatek,fixed-link = <1000 1 1 1>;
++		phy-mode = "rgmii";
++	};
++
++	mdio0: mdio-bus {
++		status = "okay";
++	};
++};
++
++&wmac {
++	status = "okay";
++
++	pinctrl-names = "default", "pa_gpio";
++	pinctrl-0 = <&pa_pins>;
++	pinctrl-1 = <&pa_gpio_pins>;
++
++	nvmem-cells = <&eeprom_art_0>, <&macaddr_tddp_28 0>;
++	nvmem-cell-names = "eeprom", "mac-address";
++};
++
++&pcie {
++	status = "okay";
++};
++
++&pcie0 {
++	wifi@0,0 {
++		compatible = "mediatek,mt76";
++		reg = <0x0000 0 0 0 0>;
++		ieee80211-freq-limit = <5000000 6000000>;
++		nvmem-cells = <&eeprom_art_1000>, <&macaddr_tddp_28 5>;
++		nvmem-cell-names = "eeprom", "mac-address";
++	};
++};
+diff --git a/target/linux/ramips/image/mt7620.mk b/target/linux/ramips/image/mt7620.mk
+index 904228a033..810ff060da 100644
+--- a/target/linux/ramips/image/mt7620.mk
++++ b/target/linux/ramips/image/mt7620.mk
+@@ -7,6 +7,17 @@ include ./common-tp-link.mk
+ 
+ DEVICE_VARS += DLINK_ROM_ID DLINK_FAMILY_MEMBER DLINK_FIRMWARE_SIZE DLINK_IMAGE_OFFSET
+ 
++define Build/mer1200g-kernel
++	$(STAGING_DIR_HOST)/bin/python3 $(TOPDIR)/scripts/mer1200g-image.py \
++		--kernel "$<" \
++		--elf "$(if $(filter initramfs,$(1)),$(patsubst $(KDIR)/vmlinux-initramfs%,$(KDIR)/vmlinux-initramfs.debug%,$<),$<.debug)" \
++		--dtb "$(KDIR)/image-$(word $(if $(filter initramfs,$(1)),2,1),$(DEVICE_DTS)).dtb" \
++		--nm "$(TARGET_CROSS)nm" --output "$@" \
++		--timestamp $(if $(SOURCE_DATE_EPOCH),$(SOURCE_DATE_EPOCH),0) \
++		--name "MER1200G Linux-$(LINUX_VERSION)$(if $(filter initramfs,$(1)), RAM)" \
++		$(if $(filter initramfs,$(1)),--initramfs)
++endef
++
+ define Build/elecom-header
+ 	cp $@ $(KDIR)/v_0.0.0.bin
+ 	( \
+@@ -819,6 +830,29 @@ define Device/linksys_e1700
+ endef
+ TARGET_DEVICES += linksys_e1700
+ 
++define Device/mercury_mer1200g-v1
++  SOC := mt7620a
++  DEVICE_VENDOR := Mercury
++  DEVICE_MODEL := MER1200G
++  DEVICE_VARIANT := v1
++  DEVICE_DTS := mt7620a_mercury_mer1200g-v1 mt7620a_mercury_mer1200g-v1-initramfs
++  DEVICE_PACKAGES := kmod-mt76x2 kmod-switch-rtl8367b
++  KERNEL_LOADADDR := 0x80000000
++  KERNEL_ENTRY := 0x80000400
++  KERNEL_DEPENDS := $(TOPDIR)/scripts/mer1200g-image.py
++  KERNEL := mer1200g-kernel
++  KERNEL_INITRAMFS := mer1200g-kernel initramfs
++  KERNEL_INITRAMFS_SUFFIX := -kernel.RAM-ONLY.bin
++  IMAGE_SIZE := 13248k
++  FILESYSTEMS := squashfs
++  # The uImage length locates rootfs; neither kernel nor rootfs has a fixed size.
++  IMAGE/sysupgrade.bin := append-kernel | pad-to $$$$(BLOCKSIZE) | \
++	append-rootfs | pad-rootfs | check-size | append-metadata
++  # Keep this experimental board opt-in until the new kernel is boot-tested.
++  DEFAULT := n
++endef
++TARGET_DEVICES += mercury_mer1200g-v1
++
+ define Device/microduino_microwrt
+   SOC := mt7620a
+   IMAGE_SIZE := 16128k
+diff --git a/target/linux/ramips/mt7620/base-files/etc/board.d/02_network b/target/linux/ramips/mt7620/base-files/etc/board.d/02_network
+index 5e18149ca9..8cee430db9 100644
+--- a/target/linux/ramips/mt7620/base-files/etc/board.d/02_network
++++ b/target/linux/ramips/mt7620/base-files/etc/board.d/02_network
+@@ -219,6 +219,12 @@ ramips_setup_interfaces()
+ 		ucidef_add_switch "switch1" \
+ 			"0:lan" "1:lan" "2:lan" "3:lan" "4:wan" "6@eth0"
+ 		;;
++	mercury,mer1200g-v1)
++		ucidef_add_switch "switch0"
++		ucidef_add_switch_attr "switch0" "enable" "0"
++		ucidef_add_switch "switch1" \
++			"1:lan:2" "2:lan:3" "3:lan:4" "4:lan:5" "0:wan:1" "7@eth0"
++		;;
+ 	netgear,pr2000|\
+ 	nexx,wt3020-4m|\
+ 	nexx,wt3020-8m)
+@@ -417,6 +423,11 @@ ramips_setup_macs()
+ 	linksys,e1700)
+ 		wan_mac=$(mtd_get_mac_ascii config WAN_MAC_ADDR)
+ 		;;
++	mercury,mer1200g-v1)
++		lan_mac=$(cat /sys/class/net/eth0/address)
++		wan_mac=$(macaddr_add "$lan_mac" 1)
++		label_mac=$lan_mac
++		;;
+ 	rostelecom,rt-fl-1|\
+ 	rostelecom,s1010)
+ 		label_mac=$(mtd_get_mac_binary "SC Nvram(permanent data)" 0x0)
+diff --git a/target/linux/ramips/patches-6.18/333-MIPS-ralink-use-appended-DT-for-MER1200G.patch b/target/linux/ramips/patches-6.18/333-MIPS-ralink-use-appended-DT-for-MER1200G.patch
+new file mode 100644
+index 0000000000..ea4113cbeb
+--- /dev/null
++++ b/target/linux/ramips/patches-6.18/333-MIPS-ralink-use-appended-DT-for-MER1200G.patch
+@@ -0,0 +1,89 @@
++Subject: [PATCH] MIPS: ralink: use the appended DT for MER1200G vendor boot
++
++The MER1200G v1 vendor U-Boot does not pass a usable argc/argv pair to
++the kernel.  Selecting the DT command line later in setup_arch() is too
++late: prom_init_cmdline() already dereferences those firmware arguments.
++
++Identify this board from the raw appended DT before parsing argv.  Check
++the header and limit the blob to the 1 MiB reserved by vmlinux.lds.S before
++reading its root compatible.  Use that same DT for memory setup and leave
++the existing command line and DT selection paths intact for other boards.
++
++This deliberately does not change the kernel entry point, appended DT
++layout, or the handling of bootloader arguments on other Ralink boards.
++
++---
++
++--- a/arch/mips/ralink/common.h
+++++ b/arch/mips/ralink/common.h
++@@ -23,6 +23,7 @@ extern struct ralink_soc_info soc_info;
++ 
++ extern void ralink_of_remap(void);
++ 
+++void *__init ralink_mer1200g_appended_dtb(void);
++ extern void __init prom_soc_init(struct ralink_soc_info *soc_info);
++ 
++ #endif /* _RALINK_COMMON_H__ */
++--- a/arch/mips/ralink/of.c
+++++ b/arch/mips/ralink/of.c
++@@ -10,6 +10,7 @@
++ #include <linux/clk.h>
++ #include <linux/export.h>
++ #include <linux/init.h>
+++#include <linux/libfdt.h>
++ #include <linux/sizes.h>
++ #include <linux/of_fdt.h>
++ #include <linux/kernel.h>
++@@ -84,6 +85,27 @@ void __init ralink_of_remap(void)
++ 		panic("Failed to remap core resources");
++ }
++ 
+++void *__init ralink_mer1200g_appended_dtb(void)
+++{
+++	void *dtb = __appended_dtb;
+++
+++	if (!IS_ENABLED(CONFIG_SOC_MT7620) ||
+++	    !IS_ENABLED(CONFIG_MIPS_RAW_APPENDED_DTB))
+++		return NULL;
+++
+++	/*
+++	 * The raw appended DT has a 1 MiB reservation in vmlinux.lds.S.
+++	 * Validate its bounds before looking up the board's compatible.
+++	 */
+++	if (fdt_check_header(dtb) || fdt_totalsize(dtb) > SZ_1M)
+++		return NULL;
+++
+++	if (fdt_node_check_compatible(dtb, 0, "mercury,mer1200g-v1"))
+++		return NULL;
+++
+++	return dtb;
+++}
+++
++ void __init plat_mem_setup(void)
++ {
++ 	void *dtb;
++@@ -94,7 +116,9 @@ void __init plat_mem_setup(void)
++ 	 * Load the builtin devicetree. This causes the chosen node to be
++ 	 * parsed resulting in our memory appearing.
++ 	 */
++-	dtb = get_fdt();
+++	dtb = ralink_mer1200g_appended_dtb();
+++	if (!dtb)
+++		dtb = get_fdt();
++ 	__dt_setup_arch(dtb);
++ 
++ 	if (early_init_dt_scan_memory())
++--- a/arch/mips/ralink/prom.c
+++++ b/arch/mips/ralink/prom.c
++@@ -61,5 +61,10 @@ void __init prom_init(void)
++ 
++ 	pr_info("SoC Type: %s\n", get_system_type());
++ 
++-	prom_init_cmdline();
+++	/* The MER1200G vendor bootloader does not supply valid argv. */
+++	if (ralink_mer1200g_appended_dtb()) {
+++		pr_info("MER1200G: using appended DT, ignoring firmware argv\n");
+++		return;
+++	}
+++	prom_init_cmdline();
++ }
+diff --git a/target/linux/ramips/patches-6.18/334-mt7620-avoid-direct-jal-in-timing-entropy.patch b/target/linux/ramips/patches-6.18/334-mt7620-avoid-direct-jal-in-timing-entropy.patch
+new file mode 100644
+index 0000000000..a2a1462842
+--- /dev/null
++++ b/target/linux/ramips/patches-6.18/334-mt7620-avoid-direct-jal-in-timing-entropy.patch
+@@ -0,0 +1,61 @@
++Subject: [PATCH] random: keep MT7620 timing-entropy mixing calls indirect
++
++A MER1200G RAM boot faulted at 0x703ec504 while a direct JAL at
++0x8000410c targeted mix_pool_bytes() at 0x803ec504. The saved return
++address was 0x80004114. The old and new kernel text at this path is
++identical, so a successful boot did not exclude this intermittent case.
++
++Apply the same volatile-function-pointer pattern already used by the
++ramips MT7620 random-helper and resume-user-mode workarounds. Limit it
++to the three mixing calls in the timing-entropy sampler and its timer
++callback. Always inline the wrapper so no new direct call replaces the
++observed one. Other SoCs retain the ordinary call.
++
++Keep all entropy samples, pool mixing, crediting, readiness tests, timer
++lifecycle and scheduling intact; do not bypass RNG initialization.
++
++---
++--- a/drivers/char/random.c
+++++ b/drivers/char/random.c
++@@ -1254,6 +1254,18 @@
++ 	unsigned int samples_per_bit;
++ };
++ 
+++/* Keep the timing-entropy mix calls indirect on affected MT7620 builds. */
+++static __always_inline void mix_timing_entropy(const void *buf, size_t len)
+++{
+++#ifdef CONFIG_NET_RALINK_MT7620
+++	void (*volatile mix_fn)(const void *, size_t) = mix_pool_bytes;
+++
+++	mix_fn(buf, len);
+++#else
+++	mix_pool_bytes(buf, len);
+++#endif
+++}
+++
++ /*
++  * Each time the timer fires, we expect that we got an unpredictable jump in
++  * the cycle counter. Even if the timer is running on another CPU, the timer
++@@ -1270,7 +1282,7 @@
++ 	struct entropy_timer_state *state = container_of(timer, struct entropy_timer_state, timer);
++ 	unsigned long entropy = random_get_entropy();
++ 
++-	mix_pool_bytes(&entropy, sizeof(entropy));
+++	mix_timing_entropy(&entropy, sizeof(entropy));
++ 	if (atomic_inc_return(&state->samples) % state->samples_per_bit == 0)
++ 		credit_init_bits(1);
++ }
++@@ -1341,11 +1353,11 @@
++ 
++ 			preempt_enable();
++ 		}
++-		mix_pool_bytes(&stack->entropy, sizeof(stack->entropy));
+++		mix_timing_entropy(&stack->entropy, sizeof(stack->entropy));
++ 		schedule();
++ 		stack->entropy = random_get_entropy();
++ 	}
++-	mix_pool_bytes(&stack->entropy, sizeof(stack->entropy));
+++	mix_timing_entropy(&stack->entropy, sizeof(stack->entropy));
++ 
++ 	free_cpumask_var(timer_cpus);
++ out:
+diff --git a/target/linux/ramips/patches-6.18/761-net-dsa-add-ralink-metadata-tagger.patch b/target/linux/ramips/patches-6.18/761-net-dsa-add-ralink-metadata-tagger.patch
+index 29c66b42a9..be69875801 100644
+--- a/target/linux/ramips/patches-6.18/761-net-dsa-add-ralink-metadata-tagger.patch
++++ b/target/linux/ramips/patches-6.18/761-net-dsa-add-ralink-metadata-tagger.patch
+@@ -14,9 +14,9 @@ from the RX descriptor, so no in-band tag is needed in either direction.
+ The conduit driver is responsible for translating METADATA_HW_PORT_MUX into
+ the frame-engine TX descriptor's forced-port bitmap.
+ 
+-Protocol value 32 is target-local. The ipq40xx, qualcommax and realtek
+-patchsets use the same value for protocols built on mutually exclusive
+-targets.
++Protocol value 36 is unused by the generic and ramips taggers. It is
++target-local: the qualcommax patchset uses the same value for QCA_ETYPE
++on a mutually exclusive target.
+ 
+ Signed-off-by: Gleb Pesin <dormancygrace@gmail.com>
+ ---
+@@ -28,18 +28,18 @@ Signed-off-by: Gleb Pesin <dormancygrace@gmail.com>
+ 
+ --- a/include/net/dsa.h
+ +++ b/include/net/dsa.h
+-@@ -60,6 +60,7 @@ struct tc_action;
+- #define DSA_TAG_PROTO_YT921X_VALUE		32
+- #define DSA_TAG_PROTO_YT922X_VALUE		33
++@@ -62,6 +62,7 @@
+  #define DSA_TAG_PROTO_YT922X_4B_VALUE		34
+-+#define DSA_TAG_PROTO_RALINK_VALUE		35
++ #define DSA_TAG_PROTO_RTL837X_8021AD_VALUE	38
++ #define DSA_TAG_PROTO_RTL9303_8021AD_VALUE	35
+++#define DSA_TAG_PROTO_RALINK_VALUE		36
+  
+  enum dsa_tag_protocol {
+  	DSA_TAG_PROTO_NONE		= DSA_TAG_PROTO_NONE_VALUE,
+-@@ -97,6 +98,7 @@ enum dsa_tag_protocol {
+- 	DSA_TAG_PROTO_YT921X		= DSA_TAG_PROTO_YT921X_VALUE,
+- 	DSA_TAG_PROTO_YT922X		= DSA_TAG_PROTO_YT922X_VALUE,
++@@ -101,6 +102,7 @@
+  	DSA_TAG_PROTO_YT922X_4B		= DSA_TAG_PROTO_YT922X_4B_VALUE,
++ 	DSA_TAG_PROTO_RTL837X_8021AD	= DSA_TAG_PROTO_RTL837X_8021AD_VALUE,
++ 	DSA_TAG_PROTO_RTL9303_8021AD	= DSA_TAG_PROTO_RTL9303_8021AD_VALUE,
+ +	DSA_TAG_PROTO_RALINK		= DSA_TAG_PROTO_RALINK_VALUE,
+  };
+  
