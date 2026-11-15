@@ -23,10 +23,11 @@ with open(sys.argv[1], encoding="utf-8") as f:
 if "mercury,mer1200g-v1" not in metadata.get("supported_devices", []):
     raise SystemExit("MER1200G support missing from sysupgrade metadata")
 PY
-  find "$IMAGE_DIR" -maxdepth 1 -type f -exec cp -t upload/ -- {} +
+  find "$IMAGE_DIR" -maxdepth 1 -type f ! -iname sha256sums -exec cp -t upload/ -- {} +
   cp "$REPORT_DIR/mer1200g-image-sizes.json" "$REPORT_DIR/mer1200g-firmware-metadata.json" upload/
-  # Recalculate against the files actually published; keep native firmware names intact.
-  (cd upload && find . -maxdepth 1 -type f ! -name sha256sums ! -name SHA256SUMS -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS)
+  # Publish one checksum list, including when packaging is rerun in the same directory.
+  find upload -maxdepth 1 -type f -iname sha256sums -delete
+  (cd upload && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' | sort -z | xargs -0 sha256sum > SHA256SUMS)
 fi
 
 {
