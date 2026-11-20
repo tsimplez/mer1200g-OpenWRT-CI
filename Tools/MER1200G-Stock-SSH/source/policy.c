@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: MIT
+ * Data only: do not put checks in this translation unit or enable LTO.
+ * The host binds only the schema-defined fields inside .mer_policy.
+ */
+#include "install_policy.h"
+#define UNBOUND_SHA "????????????????????????????????????????????????????????????????"
+#define UNBOUND_NONCE "????????????????????????????????"
+const struct mer_install_policy_data mer_install_policy
+ __attribute__((section(".mer_policy"),used,aligned(4)))={
+ .magic=MER_POLICY_MAGIC,
+ .version=MER_POLICY_VERSION,
+ .policy_bytes=MER_POLICY_BYTES,
+ .preflight_bytes=0,
+ .snapshot_helper_bytes=0,
+ .image_sha=UNBOUND_SHA,
+ .backup_sha=UNBOUND_SHA,
+ .stock_sha=UNBOUND_SHA,
+ .boot_sha=UNBOUND_SHA,
+ .device_info_sha=UNBOUND_SHA,
+ .firmware_info_sha=UNBOUND_SHA,
+ .tddp_sha=UNBOUND_SHA,
+ .art_sha=UNBOUND_SHA,
+ .preflight_nonce=UNBOUND_NONCE,
+ .write_nonce=UNBOUND_NONCE,
+ .preflight_sha=UNBOUND_SHA,
+ .snapshot_helper_sha=UNBOUND_SHA,
+};

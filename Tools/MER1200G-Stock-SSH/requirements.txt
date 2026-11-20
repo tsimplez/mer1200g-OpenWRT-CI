@@ -1,0 +1,2 @@
+# Tested with the stock SSH algorithm set.
+paramiko==3.5.1

@@ -68,6 +68,7 @@ MER1200G使用单独的 `Config/MER1200G.txt`：保留已实测的平台默认�
 
 编译结果从对应Release下载，保留原始镜像名，并附完整配置、manifest、buildinfo、镜像容量报告、源码/主题来源、升级元数据和 `SHA256SUMS`。TEST勾选时只展开配置，不编译固件。该入口为手动触发，不增加每日自动编译；已有Auto-Clean的清理策略保持原样，需要长期保存的固件请另存。
 
+- `stock-ssh-installer.pyz`：电脑端单文件 SSH 首刷包，包含本次固件和安装器。支持匹配已记录原厂版本的 MER1200G Ver1.1，自动保存新机完整备份、绑定新机身份、演练并刷入，无需手工制作 `bundle`。流程见 [SSH 首刷说明](Tools/MER1200G-Stock-SSH/README.md)。新流程已加入离线核验，仍需新机实机验收。
 - `squashfs-sysupgrade.bin`：供**已完成原生分区迁移的MER1200G v1**后续升级使用。原厂及旧V2不能直接使用；本地首次迁移不是普通sysupgrade。
 - `initramfs-kernel.RAM-ONLY.bin`：仅用于U-Boot从内存启动，不能写入闪存。
 - CI通过仅证明编译、必需包、封装、容量和元数据检查通过。实际启动、无线客户端流量、首次迁移及后续升级需实机确认；LED/Reset GPIO尚未实现。

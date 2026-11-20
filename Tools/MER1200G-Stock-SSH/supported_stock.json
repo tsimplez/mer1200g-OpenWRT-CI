@@ -1,0 +1,8 @@
+{
+  "format": "mer1200g-stock-compatibility-v1",
+  "model": "MERCURY MER1200G v1 / case Ver1.1",
+  "stock_region_sha256": [
+    "f4a1e7740eb453ec0f685e6b1803f86a701d5dfba3c04e1e1b3d4e3b3d74f6c4"
+  ],
+  "scope": "Known stock firmware window [0x40000,0xd30000); per-device bootloader, vendor identity and ART are captured and retained separately."
+}
