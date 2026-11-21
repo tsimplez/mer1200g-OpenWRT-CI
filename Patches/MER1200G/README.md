@@ -1,6 +1,6 @@
 # MER1200G 设备支持来源
 
-`0001-native-support.patch` 导出自本地已实测的 VIKINGYFY/immortalwrt 修改，基准为 `2bb59802ceeb8bcba408a7b6694f0c4669e24eab`（2026-11-12）。`source.json` 记录补丁 SHA256 与八个原始文件的 SHA256；不含 `.gitignore`、私有 MAC、密码、备份或 CI 机器路径。原文件的 SPDX/许可头保留。
+`0001-native-support.patch` 以本地已实测的 VIKINGYFY/immortalwrt 修改为基础，基准为 `2bb59802ceeb8bcba408a7b6694f0c4669e24eab`（2026-11-12），并加入下述内核填充布局兼容。`source.json` 记录补丁 SHA256 与八个补丁结果文件的 SHA256；不含 `.gitignore`、私有 MAC、密码、备份或 CI 机器路径。原文件的 SPDX/许可头保留。
 
 | 源文件 | 专业用途 | 通俗说明 |
 | --- | --- | --- |
@@ -16,6 +16,8 @@
 `prepare-mer1200g.sh source` 先校验补丁哈希，再执行 `git apply --check`。源码已逐字包含这些修改时，必须通过严格的反向检查才能跳过；其他情况停止构建。未来内核/上游变化使补丁失配时，应在实际源码中重审并重新导出，不能删除检查或忽略应用失败。
 
 主题独立锁在 `Config/MER1200G-theme.json`，不混进板级补丁。defconfig后同时要求Linux 6.18系列，避免切到其它内核时漏用早期启动补丁。上游仓库本身尚未收录本地支持，因此直接在本CI改SOURCE仓库/BRANCH即可构建的前提，是目标分支仍兼容这份补丁，或已经逐字包含它；跨内核系列需要重新移植与实测。
+
+上游 `334-MIPS-ralink-keep-the-kernel-code-out-of-the-first-32K.patch` 将 MT7620 的原始内核入口从 `0x80000400` 移到 `0x80008000`，用于避开 24K EPC 勘误。镜像生成器验证真实 ELF 入口及原始跳转后，仅在全零保留区域的 `0x80000400` 补入启动跳转和 NOP 延迟槽，保留内核代码的新位置、附加 DTB 地址和可回收填充页；uImage 入口仍保持原厂要求的 `0x80000400`。旧入口布局保持原样，未知布局或非零填充仍拒绝打包。此兼容变更经过静态回归验证，仍需新固件的硬件启动实测。
 
 ## 固件发布与取回
 

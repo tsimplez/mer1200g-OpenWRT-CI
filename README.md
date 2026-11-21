@@ -85,13 +85,3 @@ MER1200G使用单独的 `Config/MER1200G.txt`：保留已实测的平台默认�
 | `.github/scripts/prepare-mer1200g.sh` | 应用/识别补丁、固定主题、生成及断言配置 | 编译前安装适配材料并检查机型和必需功能选对了 |
 | `.github/scripts/verify-mer1200g-images.py` | 验证uImage/LZMA/CRC、rootfs和overlay边界、安装包清单 | 检查生成的包格式对、放得下、功能没丢 |
 | `.github/scripts/package-mer1200g.sh` | 提取并验证升级元数据，保留产物与生成发布说明/哈希 | 把固件和核对资料一起整理好，标清哪个包能升级 |
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=vikingyfy%2Fopenwrt-ci&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=vikingyfy/openwrt-ci&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=vikingyfy/openwrt-ci&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=vikingyfy/openwrt-ci&type=date&legend=top-left" />
- </picture>
-</a>

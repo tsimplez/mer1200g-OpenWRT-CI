@@ -3,11 +3,11 @@
   "source_base_commit": "2bb59802ceeb8bcba408a7b6694f0c4669e24eab",
   "kernel_series": "6.18",
   "device_patch": "0001-native-support.patch",
-  "device_patch_sha256": "f02ef3402ad7b608c8d9bc83c29225627c0ba89b462abcb31666c4114d157dff",
+  "device_patch_sha256": "627ce6093d8513d0c0451a596db0f5f861eef6f19df16a5265fddaff992275c3",
   "files": [
     {
       "path": "scripts/mer1200g-image.py",
-      "sha256": "173ce895b2dc4b266829c496027194cca59002ac81e6103202684fd6cb7ef8cb"
+      "sha256": "6c587bb7a6b14dd3cab815371c3ce62a25ce153d2e27684a7dde793a4160a972"
     },
     {
       "path": "target/linux/ramips/dts/mt7620a_mercury_mer1200g-v1.dts",
