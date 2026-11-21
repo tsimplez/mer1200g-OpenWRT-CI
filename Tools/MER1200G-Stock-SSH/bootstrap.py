@@ -42,7 +42,7 @@ MODEL = {
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DEVICE_COMMAND = (
     "test -c /dev/mtd9 && test ! -L /dev/mtd9 && "
-    "stat -c '%t %T' /dev/mtd9 && "
+    "LC_ALL=C ls -ln /dev/mtd9 && "
     "cat /sys/class/mtd/mtd9/type /sys/class/mtd/mtd9/size "
     "/sys/class/mtd/mtd9/erasesize /sys/class/mtd/mtd9/writesize "
     "/sys/class/mtd/mtd9/oobsize"
@@ -82,6 +82,44 @@ def windows_index():
     return next(iter(indices))
 
 
+def stock_password(index=None):
+    """Calculate the stock diagnostic password from the bound wired neighbor.
+
+    MAC and password stay in memory. SSH host-key acceptance still precedes
+    authentication; an absent or ambiguous neighbor never permits guessing.
+    """
+    if index is None:
+        value = getpass.getpass("Stock root SSH password: ")
+        require(value, "Stock SSH password is empty; no router connection attempted")
+        return value
+    require(type(index) is int and index > 0, "Invalid wired interface index")
+    script = (
+        "Get-NetNeighbor -InterfaceIndex " + str(index) +
+        " -AddressFamily IPv4 -IPAddress " + HOST +
+        " -ErrorAction Stop | Select-Object IPAddress,InterfaceIndex,LinkLayerAddress,"
+        "@{Name='State';Expression={[string]$_.State}} | ConvertTo-Json -Compress")
+    rows = json.loads(subprocess.check_output(
+        ["powershell.exe", "-NoProfile", "-Command", script]))
+    rows = [rows] if isinstance(rows, dict) else rows
+    require(isinstance(rows, list) and len(rows) == 1,
+            "Need one stock router neighbor on the wired adapter; open its stock web UI first")
+    row = rows[0]
+    require(isinstance(row, dict) and row.get("IPAddress") == HOST and
+            row.get("InterfaceIndex") == index and
+            row.get("State") in {"Reachable", "Stale", "Delay", "Probe", "Permanent"},
+            "Stock router neighbor does not match the wired interface")
+    mac = row.get("LinkLayerAddress", "")
+    require(isinstance(mac, str) and
+            re.fullmatch(r"[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5}", mac) is not None,
+            "Invalid stock LAN MAC in the wired neighbor table")
+    normalized = mac.replace("-", "").upper()
+    require(normalized != "000000000000" and not (int(normalized[:2], 16) & 1),
+            "Stock LAN MAC must be a nonzero unicast address")
+    print("Stock diagnostic password: auto from wired LAN MAC " + mac.upper() +
+          "; password not saved", flush=True)
+    return hashlib.md5(normalized.encode("ascii")).hexdigest()[:8]
+
+
 def connect_stock(workdir, host=HOST):
     """Trust one explicitly accepted, directly connected stock SSH server.
 
@@ -105,15 +143,19 @@ def connect_stock(workdir, host=HOST):
             ssh.get_host_keys().add(hostname, key.get_name(), key)
 
     client.set_missing_host_key_policy(FirstConnection())
-    password = getpass.getpass("Stock root SSH password: ")
+    index = windows_index()
+    password = stock_password() if index is None else None
     sock = socket.socket()
     sock.settimeout(15)
     try:
-        index = windows_index()
         if index is not None:
             sock.setsockopt(socket.IPPROTO_IP, 31, struct.pack("!I", index))
         sock.bind((PC_ADDRESS, 0))
         sock.connect((host, SSH_PORT))
+        # A fresh network preparation clears ARP. This bound TCP connection
+        # resolves the current router MAC before the neighbor-table lookup.
+        if index is not None:
+            password = stock_password(index)
         client.connect(host, port=SSH_PORT, username="root", password=password,
                        sock=sock, allow_agent=False, look_for_keys=False,
                        timeout=15, banner_timeout=15, auth_timeout=20)
@@ -124,8 +166,8 @@ def connect_stock(workdir, host=HOST):
                 "Authenticated stock host key differs from the explicitly accepted key")
         return client
     except BaseException:
-        sock.close()
         client.close()
+        sock.close()
         raise
     finally:
         password = None
@@ -159,10 +201,20 @@ def parse_layout(data):
 def parse_geometry(data):
     lines = data.decode("ascii").strip().splitlines()
     require(len(lines) == 6, "Missing stock NOR device geometry")
-    device = lines[0].split()
-    require(len(device) == 2 and all(re.fullmatch(r"[0-9a-fA-F]+", p) for p in device),
-            "Invalid stock MTD character-device numbers")
-    require((int(device[0], 16), int(device[1], 16)) == (90, 18),
+    # Vendor BusyBox 1.22.1 has ls but no stat applet. Numeric ls reports the
+    # actual character node's major/minor, independently of the sysfs geometry.
+    listing = re.fullmatch(
+        r"c[rwxstST-]{9}\s+\d+\s+\d+\s+\d+\s+(\d+),\s+(\d+)\s+.+\s+/dev/mtd9",
+        lines[0])
+    if listing:
+        device = tuple(int(value, 10) for value in listing.groups())
+    else:
+        # Retain support for the hexadecimal reports used by older captures.
+        fields = lines[0].split()
+        require(len(fields) == 2 and all(re.fullmatch(r"[0-9a-fA-F]+", p) for p in fields),
+                "Invalid stock MTD character-device numbers")
+        device = tuple(int(value, 16) for value in fields)
+    require(device == (90, 18),
             "The stock full-flash device is not character device 90:18")
     require(lines[1] == "nor" and lines[2:] == [str(FLASH_BYTES), "65536", "1", "0"],
             "Stock full-flash device is not the required 16 MiB SPI NOR")

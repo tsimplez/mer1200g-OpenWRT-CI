@@ -43,6 +43,7 @@ def require_stock_host_key(client, expected):
     if fingerprint!=expected:raise RuntimeError('Stock host key differs from this device backup')
 def connect(bundle, native=False):
     import paramiko
+    from bootstrap import stock_password
     client=paramiko.SSHClient();known=bundle/('known_hosts_native' if native else 'known_hosts')
     expected=None if native else stock_fingerprint(bundle)
     router_ipv4,pc_ipv4,port=ssh_endpoint(native)
@@ -56,14 +57,17 @@ def connect(bundle, native=False):
             if input('Trust this directly connected router? Type yes: ').strip()!='yes':raise RuntimeError('Host key not accepted')
             ssh.get_host_keys().add(hostname,key.get_name(),key);ssh.save_host_keys(str(known))
     client.set_missing_host_key_policy(FirstConnection())
-    password=getpass.getpass('Native root password (set it in LuCI first): ' if native else 'Stock root SSH password: ')
-    sock=socket.socket();sock.settimeout(15);index=windows_index()
+    index=windows_index()
+    password=getpass.getpass('Native root password (set it in LuCI first): ') if native else (stock_password() if index is None else None)
+    if (native or index is None) and not password:raise RuntimeError('SSH password is empty; no router connection attempted')
+    sock=socket.socket();sock.settimeout(15)
     if index is not None:sock.setsockopt(socket.IPPROTO_IP,31,struct.pack('!I',index))
     try:
         sock.bind((pc_ipv4,0));sock.connect((router_ipv4,port))
+        if not native and index is not None:password=stock_password(index)
         client.connect(router_ipv4,port=port,username='root',password=password,sock=sock,allow_agent=False,look_for_keys=False,timeout=15,banner_timeout=15,auth_timeout=20)
         if not native:require_stock_host_key(client,expected)
-    except BaseException:sock.close();client.close();raise
+    except BaseException:client.close();sock.close();raise
     finally:password=None
     return client
 def command(client,text,timeout=120):

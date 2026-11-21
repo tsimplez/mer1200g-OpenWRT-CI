@@ -95,6 +95,28 @@ class FakeRouter:
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_vendor_busybox_numeric_device_listing(self):
+        raw = (b"crw-r--r--    1 0        0          90,  18 Jan  1  1970 /dev/mtd9\n"
+               b"nor\n16777216\n65536\n1\n0\n")
+        self.assertEqual(bootstrap.parse_geometry(raw)["major"], 90)
+        self.assertEqual(bootstrap.parse_geometry(raw)["minor"], 18)
+
+    def test_numeric_listing_rejects_wrong_node_or_geometry(self):
+        row = b"crw-r--r-- 1 0 0 90, 18 Jan 1 1970 /dev/mtd9"
+        suffix = b"\nnor\n16777216\n65536\n1\n0\n"
+        for invalid in [row.replace(b"90, 18", b"90, 16"),
+                        row.replace(b"90, 18", b"91, 18"),
+                        row.replace(b"crw", b"brw"),
+                        row.replace(b"crw", b"lrw"),
+                        row.replace(b"/dev/mtd9", b"/dev/mtd8"),
+                        row + b" -> /dev/mtd8",
+                        row.replace(b"90, 18", b"garbage"),
+                        row + b"\n" + row]:
+            with self.subTest(row=invalid), self.assertRaises(RuntimeError):
+                bootstrap.parse_geometry(invalid + suffix)
+        with self.assertRaises(RuntimeError):
+            bootstrap.parse_geometry(row + suffix.replace(b"nor", b"nand"))
+
     def capture(self, root, router):
         return bootstrap.collect_stock(root, supported_stock_sha256=SUPPORTED_STOCK_SHA256,
                                        connect_fn=router.connect, command_fn=router.command)

@@ -1,0 +1,8 @@
+# Device backups, PC network snapshots and runtime records stay local.
+*-work/
+MER1200G-network-recovery-*/
+MER1200G-firewall-backup-*.json
+*-agent.log
+*-agent-status.json
+__pycache__/
+*.pyc
